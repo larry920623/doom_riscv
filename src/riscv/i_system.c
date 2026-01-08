@@ -19,6 +19,7 @@
  */
 
 
+/* i_system.c */
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,356 +29,102 @@
 
 #include "doomdef.h"
 #include "doomstat.h"
-
 #include "d_main.h"
 #include "g_game.h"
 #include "m_misc.h"
 #include "i_sound.h"
 #include "i_video.h"
-
 #include "i_system.h"
+#include "console.h" // 如果編譯報錯找不到 console.h，可以註解掉這行
 
-#include "console.h"
+// [MyCPU Hardware Definition]
+#define MYCPU_INPUT_BASE    0x40000000 
+volatile uint32_t* const INPUT_PTR = (uint32_t*)MYCPU_INPUT_BASE;
 
-enum {
-	KEY_EVENT = 0,
-	MOUSE_MOTION_EVENT = 1,
-	MOUSE_BUTTON_EVENT = 2,
-	QUIT_EVENT = 3,
-};
+// [原檔保留] 事件結構定義
+enum { KEY_EVENT=0, MOUSE_MOTION_EVENT=1, MOUSE_BUTTON_EVENT=2, QUIT_EVENT=3 };
+typedef struct { uint32_t keycode; uint8_t state; } key_event_t;
+typedef struct { int32_t x, y, xrel, yrel; } mouse_motion_t;
+typedef struct { uint8_t button; uint8_t state; } mouse_button_t;
+typedef struct { uint32_t type; union { key_event_t key_event; union { mouse_motion_t motion; mouse_button_t button; } mouse; }; } emu_event_t;
 
-typedef struct {
-	uint32_t keycode;
-	uint8_t state;
-} key_event_t;
+// [MyCPU] 記憶體分配 - 使用靜態陣列避免 Heap 爆炸
+#define DOOM_HEAP_SIZE (4 * 1024 * 1024)
+byte doom_heap[DOOM_HEAP_SIZE];
 
-typedef struct {
-	int32_t x, y, xrel, yrel;
-} mouse_motion_t;
-
-typedef struct {
-	uint8_t button;
-	uint8_t state;
-} mouse_button_t;
-
-typedef struct {
-	uint32_t type;
-	union {
-		key_event_t key_event;
-		union {
-			mouse_motion_t motion;
-			mouse_button_t button;
-		} mouse;
-	};
-} emu_event_t;
-
-typedef struct {
-	emu_event_t *base;
-	size_t start;
-} event_queue_t;
-
-enum {
-	RELATIVE_MODE_SUBMISSION = 0,
-	WINDOW_TITLE_SUBMISSION = 1,
-};
-
-typedef struct {
-	uint8_t enabled;
-} mouse_submission_t;
-
-typedef struct {
-	uint32_t title;
-	uint32_t size;
-} title_submission_t;
-
-typedef struct {
-	uint32_t type;
-	union {
-		mouse_submission_t mouse;
-		title_submission_t title;
-	};
-} emu_submission_t;
-
-typedef struct {
-	emu_submission_t *base;
-	size_t end;
-} submission_queue_t;
-
-/* Video Ticks tracking */
-static uint16_t vt_last = 0;
-static uint32_t vt_base = 0;
-
-static event_queue_t event_queue = {
-	.base = NULL,
-	.start = 0,
-};
-static submission_queue_t submission_queue = {
-	.base = NULL,
-	.end = 0,
-};
-static unsigned int event_count = 0;
-const int queues_capacity = 128;
-
-void
-I_SetRelativeMode(boolean enabled)
-{
-	emu_submission_t submission;
-	submission.type = RELATIVE_MODE_SUBMISSION;
-	submission.mouse.enabled = enabled;
-	submission_queue.base[submission_queue.end++] = submission;
-	submission_queue.end &= queues_capacity - 1;
-	register int a0 __asm__("a0") = 1;
-	register int a7 __asm__("a7") = 0xfeed;
-	__asm__ volatile("ecall" : "+r"(a0) : "r"(a7));
+void I_SetRelativeMode(boolean enabled) {
+    // [Modified] 移除 ecall
 }
 
-void
-I_Init(void)
+void I_Init(void)
 {
-	void *base;
-	size_t queue_size = sizeof(emu_event_t) * queues_capacity + sizeof(emu_submission_t) * queues_capacity;
-
-	base = malloc(queue_size);
-	if (!base)
-		I_Error("Failed to allocate %zu bytes for event queues", queue_size);
-
-	event_queue.base = base;
-	submission_queue.base = base + sizeof(emu_event_t) * queues_capacity;
-	register int a0 __asm__("a0") = (uintptr_t) base;
-	register int a1 __asm__("a1") = queues_capacity;
-	register int a2 __asm__("a2") = (uintptr_t) &event_count;
-	register int a7 __asm__("a7") = 0xc0de;
-	__asm__ volatile("ecall" : "+r"(a0) : "r"(a1), "r"(a2), "r"(a7));
-	I_SetRelativeMode(true);
+    // [Modified] 移除 ecall 與 Queue 初始化
+    // MyCPU 不需要建立 Queue 給模擬器填，而是直接讀 MMIO
+    I_SetRelativeMode(true);
 }
 
-
-byte *
-I_ZoneBase(int *size)
+byte *I_ZoneBase(int *size)
 {
-	byte *base;
-
-	/* Give 6M to DOOM */
-	*size = 6 * 1024 * 1024;
-	base = malloc(*size);
-	if (!base)
-		I_Error("Failed to allocate %d bytes for zone memory", *size);
-	return base;
+    // [MyCPU] 改用靜態分配
+	*size = DOOM_HEAP_SIZE;
+	return doom_heap;
 }
 
-
-int
-I_GetTime(void)
+// [MyCPU] 時間函式 - 使用 rdcycle
+#define CPU_FREQ 50000000
+#define TICKS_PER_SEC 35
+int I_GetTime(void)
 {
-	uint16_t vt_now = (uint64_t) clock() * 35 / CLOCKS_PER_SEC;
-
-	if (vt_now < vt_last)
-		vt_base += 65536;
-	vt_last = vt_now;
-
-	/* TIC_RATE is 35 in theory */
-	return vt_base + vt_now;
+    unsigned long long cycles;
+    asm volatile ("rdcycle %0" : "=r" (cycles));
+	return (int)((cycles * TICKS_PER_SEC) / CPU_FREQ);
 }
 
-static int PollEvent(emu_event_t* event)
+// [Stub] 暫時不處理輸入事件
+static void I_GetRemoteEvent(void)
 {
-	if (event_count <= 0)
-		return 0;
-
-	*event = event_queue.base[event_queue.start++];
-	event_queue.start &= queues_capacity - 1;
-	--event_count;
-
-	return 1;
+    // TODO: 未來在這裡讀取 *INPUT_PTR
+    // 並將硬體訊號轉換為 event_t 結構傳給 D_PostEvent
 }
 
-static void
-I_GetRemoteEvent(void)
-{
-	event_t event;
+void I_StartFrame(void) {}
 
-	static byte s_btn = 0;
-
-	boolean mupd = false;
-	int mdx = 0;
-	int mdy = 0;
-
-	emu_event_t emu_event;
-	while (PollEvent(&emu_event)) {
-		if (emu_event.type == KEY_EVENT && emu_event.key_event.keycode & 0x40000000) {
-			uint32_t keycode = emu_event.key_event.keycode;
-			switch (keycode) {
-				case 0x40000050:
-					keycode = KEY_LEFTARROW;
-					break;
-				case 0x4000004F:
-					keycode = KEY_RIGHTARROW;
-					break;
-				case 0x40000051:
-					keycode = KEY_DOWNARROW;
-					break;
-				case 0x40000052:
-					keycode = KEY_UPARROW;
-					break;
-				case 0x400000E5:
-					keycode = KEY_RSHIFT;
-					break;
-				case 0x400000E4:
-					keycode = KEY_RCTRL;
-					break;
-				case 0x400000E6:
-					keycode = KEY_RALT;
-					break;
-				case 0x40000048:
-					keycode = KEY_PAUSE;
-					break;
-				case 0x4000003A:
-					keycode = KEY_F1;
-					break;
-				case 0x4000003B:
-					keycode = KEY_F2;
-					break;
-				case 0x4000003C:
-					keycode = KEY_F3;
-					break;
-				case 0x4000003D:
-					keycode = KEY_F4;
-					break;
-				case 0x4000003E:
-					keycode = KEY_F5;
-					break;
-				case 0x4000003F:
-					keycode = KEY_F6;
-					break;
-				case 0x40000040:
-					keycode = KEY_F7;
-					break;
-				case 0x40000041:
-					keycode = KEY_F8;
-					break;
-				case 0x40000042:
-					keycode = KEY_F9;
-					break;
-				case 0x40000043:
-					keycode = KEY_F10;
-					break;
-				case 0x40000044:
-					keycode = KEY_F11;
-					break;
-				case 0x40000045:
-					keycode = KEY_F12;
-					break;
-			}
-			emu_event.key_event.keycode = keycode;
-		}
-
-		switch (emu_event.type) {
-			case KEY_EVENT:
-				event.type = emu_event.key_event.state ? ev_keydown : ev_keyup;
-				event.data1 = emu_event.key_event.keycode;
-				D_PostEvent(&event);
-				break;
-			case MOUSE_BUTTON_EVENT:
-				if (emu_event.mouse.button.state)
-					s_btn |= (1 << (emu_event.mouse.button.button - 1));
-				else
-					s_btn &= ~(1 << (emu_event.mouse.button.button - 1));
-				mupd = true;
-				break;
-			case MOUSE_MOTION_EVENT:
-				mdx += emu_event.mouse.motion.xrel;
-				mdy += emu_event.mouse.motion.yrel;
-				mupd = true;
-				break;
-			case QUIT_EVENT:
-				I_Quit();
-				break;
-		}
-	}
-
-	if (mupd) {
-		event.type = ev_mouse;
-		event.data1 = s_btn;
-		event.data2 =   mdx << 2;
-		event.data3 = - mdy << 2;   /* Doom is sort of inverted ... */
-		D_PostEvent(&event);
-	}
-}
-
-void
-I_StartFrame(void)
-{
-	/* Nothing to do */
-}
-
-void
-I_StartTic(void)
+void I_StartTic(void)
 {
 	I_GetRemoteEvent();
 }
 
-ticcmd_t *
-I_BaseTiccmd(void)
+ticcmd_t *I_BaseTiccmd(void)
 {
 	static ticcmd_t emptycmd;
 	return &emptycmd;
 }
 
-
-void
-I_Quit(void)
+void I_Quit(void)
 {
 	I_ShutdownSound();
 	D_QuitNetGame();
 	M_SaveDefaults();
 	I_ShutdownGraphics();
-	exit(0);
+	while(1); // [MyCPU] 死迴圈取代 exit
 }
 
-
-byte *
-I_AllocLow(int length)
+byte *I_AllocLow(int length)
 {
-	byte *mem;
-
-	mem = calloc(1, length);
-	if (!mem)
-		I_Error("Failed to allocate %d bytes", length);
+	byte *mem = malloc(length);
+	if (!mem) I_Error("Failed to allocate %d bytes", length);
 	return mem;
 }
 
+void I_Tactile ( int on, int off, int total ) {}
 
-void
-I_Tactile
-( int on,
-  int off,
-  int total )
+void I_Error(char *error, ...)
 {
-	// UNUSED.
-	on = off = total = 0;
-}
-
-
-void
-I_Error(char *error, ...)
-{
+    // [Modified] 移除 printf，因為不一定有 UART
 	va_list argptr;
-
-	// Message first.
 	va_start (argptr,error);
-	fprintf (stderr, "Error: ");
-	vfprintf (stderr,error,argptr);
-	fprintf (stderr, "\n");
+	// vfprintf (stderr,error,argptr); // 可選：如果 UART 有通
 	va_end (argptr);
-
-	fflush( stderr );
-
-	// Shutdown. Here might be other errors.
-	if (demorecording)
-		G_CheckDemoStatus();
-
-	D_QuitNetGame ();
 	I_ShutdownGraphics();
-
-	exit(-1);
+	while(1); // [MyCPU] 死迴圈
 }
