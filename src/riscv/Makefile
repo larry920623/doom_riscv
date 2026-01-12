@@ -30,11 +30,12 @@ SOURCES_doom_arch := \
 	s_sound.c \
 	console.c
 
+WAD_OBJ := wad_data.o
 
 all: doom-riscv.elf
 
-doom-riscv.elf: $(addprefix ../,$(SOURCES_doom)) $(SOURCES_doom_arch)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(addprefix ../,$(SOURCES_doom)) $(SOURCES_doom_arch)
+doom-riscv.elf: $(addprefix ../,$(SOURCES_doom)) $(SOURCES_doom_arch) $(WAD_OBJ)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 	$(SIZE) $@
 
 clean:
@@ -46,3 +47,6 @@ clean:
 
 .PHONY: all clean
 .PRECIOUS: *.elf
+
+$(WAD_OBJ): doom1.wad
+	$(OBJCOPY) -I binary -O elf32-littleriscv -B riscv $< $@

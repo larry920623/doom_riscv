@@ -549,13 +549,13 @@ char            title[128];
 void D_AddFile (char *file)
 {
     int     numwadfiles;
-    char    *newfile;
+    //char    *newfile;
 
     for (numwadfiles = 0 ; wadfiles[numwadfiles] ; numwadfiles++)
         ;
 
-    newfile = malloc (strlen(file)+1);
-    strcpy (newfile, file);
+    //newfile = malloc (strlen(file)+1);
+    //strcpy (newfile, file);
 
     wadfiles[numwadfiles] = newfile;
 }
